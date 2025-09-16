@@ -1,90 +1,152 @@
+-- AutoRollMain.lua (LocalScript)
+-- Coloca este LocalScript en StarterPlayerScripts y el ModuleScript AutoRollGui.lua en la misma carpeta.
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local UIS = game:GetService("UserInputService")
+local player = Players.LocalPlayer
 
-local P=game:GetService("Players")
-local Rep=game:GetService("ReplicatedStorage")
-local UIS=game:GetService("UserInputService")
-local p=P.LocalPlayer
-local folder=p.PlayerGui:WaitForChild("MainFrames"):WaitForChild("UnitFrame"):WaitForChild("ScrollingFrame")
+-- require GUI
+local GuiModule = require(script:WaitForChild("AutoRollGui")) -- si lo pones en otro lado, ajusta la ruta
+local gui = GuiModule.new(player)
 
-local interval=0.1
-local stopT={Xenith=true,Fantasy=true}
-local id,running,sending=nil,false,false
+-- carpeta donde están las unidades (igual que tu script original)
+local folder = player:WaitForChild("PlayerGui"):WaitForChild("MainFrames"):WaitForChild("UnitFrame"):WaitForChild("ScrollingFrame")
 
--- GUI (compacto)
-local g=Instance.new("ScreenGui",p.PlayerGui);g.Name="AutoRollGUI"
-local f=Instance.new("Frame",g);f.Size=UDim2.new(0,300,0,300);f.Position=UDim2.new(0,20,0,100);f.Active=true;f.Draggable=true;f.BackgroundColor3=Color3.fromRGB(30,30,30)
-local top=Instance.new("Frame",f);top.Size=UDim2.new(1,0,0,30);top.BackgroundColor3=Color3.fromRGB(40,40,40)
-local T=Instance.new("TextLabel",top);T.Size=UDim2.new(1,-40,1,0);T.Position=UDim2.new(0,8,0,0);T.BackgroundTransparency=1;T.Text="AutoRoll (compacto)";T.TextXAlignment=0
-local close=Instance.new("TextButton",top);close.Size=UDim2.new(0,30,1,0);close.Position=UDim2.new(1,-34,0,0);close.Text="X"
-local list=Instance.new("ScrollingFrame",f);list.Size=UDim2.new(1,0,1,-90);list.Position=UDim2.new(0,0,0,30);list.BorderSizePixel=0;list.ScrollBarThickness=6
-local layout=Instance.new("UIListLayout",list);layout.Padding=UDim.new(0,4)
-local sel=Instance.new("TextLabel",f);sel.Size=UDim2.new(1,0,0,30);sel.Position=UDim2.new(0,0,1,-30);sel.BackgroundTransparency=1;sel.Text="Seleccionada: Ninguna";sel.TextScaled=true
-local intervalBox=Instance.new("TextBox",f);intervalBox.Size=UDim2.new(0,100,0,24);intervalBox.Position=UDim2.new(1,-110,0,36);intervalBox.Text=tostring(interval);intervalBox.ClearTextOnFocus=false
-local startBtn=Instance.new("TextButton",f);startBtn.Size=UDim2.new(0,100,0,28);startBtn.Position=UDim2.new(1,-110,0,66);startBtn.Text="▶ Iniciar";startBtn.BackgroundColor3=Color3.fromRGB(0,150,80)
+-- estado
+local selectedId = nil
+local sending = false
+local running = false
+local interval = 0.1
+local stopT = { Xenith = true, Fantasy = true }
+local connA, connR, folderConn
 
-local function setCanvas() list.CanvasSize=UDim2.new(0,0,0,layout.AbsoluteContentSize.Y+8) end
-layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(setCanvas)
-
+-- Helper: detecta si la unidad tiene un trait que detiene
 local function hasStop(u)
-	if not u then return false end
-	local t=u:FindFirstChild("Main") and u.Main:FindFirstChild("Main") and u.Main.Main:FindFirstChild("TraitIcons")
-	return t and (t:FindFirstChild("Xenith",true) or t:FindFirstChild("Fantasy",true))
+    if not u then return false end
+    local t = u:FindFirstChild("Main") and u.Main:FindFirstChild("Main") and u.Main.Main:FindFirstChild("TraitIcons")
+    return t and (t:FindFirstChild("Xenith",true) or t:FindFirstChild("Fantasy",true))
 end
 
-local connA,connR
+-- Attach watchers to selected unit's TraitIcons
 local function attach()
-	if connA then connA:Disconnect();connA=nil end
-	if connR then connR:Disconnect();connR=nil end
-	sending=false
-	if not id then return end
-	local u=folder:FindFirstChild(id); if not u then return end
-	local t=u.Main and u.Main.Main and u.Main.Main.TraitIcons; if not t then return end
-	if hasStop(u) then sending=false else if running then sending=true end end
-	connA=t.ChildAdded:Connect(function(c) if stopT[c.Name] then sending=false end end)
-	connR=t.ChildRemoved:Connect(function() if not hasStop(u) and running then sending=true end end)
+    if connA then connA:Disconnect(); connA = nil end
+    if connR then connR:Disconnect(); connR = nil end
+    if not selectedId then sending = false return end
+
+    local u = folder:FindFirstChild(selectedId)
+    if not u then sending = false return end
+    local t = u.Main and u.Main.Main and u.Main.Main.TraitIcons
+    if not t then sending = false return end
+
+    -- if unit already has stop trait, stop
+    if hasStop(u) then
+        sending = false
+    else
+        if running then sending = true end
+    end
+
+    connA = t.ChildAdded:Connect(function(c)
+        if stopT[c.Name] then sending = false end
+    end)
+    connR = t.ChildRemoved:Connect(function()
+        if not hasStop(u) and running then sending = true end
+    end)
 end
 
-local function refresh()
-	for _,c in ipairs(list:GetChildren()) do if c:IsA("TextButton") then c:Destroy() end end
-	for _,u in ipairs(folder:GetChildren()) do
-		local nm=u:FindFirstChild("Main") and u.Main:FindFirstChild("Main") and u.Main.Main:FindFirstChild("UnitName")
-		if nm then
-			local btn=Instance.new("TextButton");btn.Size=UDim2.new(1,-8,0,24);btn.TextXAlignment=Enum.TextXAlignment.Left
-			btn.Text="  "..u.Name.." | "..nm.Text;btn.Parent=list
-			btn.MouseButton1Click:Connect(function() id=u.Name; sel.Text="Seleccionada: "..btn.Text; attach() end)
-		end
-	end
-	task.wait(); setCanvas()
+-- Refresh UI list
+local function refreshList()
+    -- clear current entries
+    for _,c in ipairs(gui.unitList:GetChildren()) do
+        if c:IsA("TextButton") then c:Destroy() end
+    end
+
+    -- create new entries
+    for _,u in ipairs(folder:GetChildren()) do
+        local nm = u:FindFirstChild("Main") and u.Main:FindFirstChild("Main") and u.Main.Main:FindFirstChild("UnitName")
+        if nm then
+            local display = u.Name .. " | " .. nm.Text
+            local btn = gui:CreateUnitButton(u.Name, display)
+            btn.MouseButton1Click:Connect(function()
+                selectedId = u.Name
+                gui.selectedLabel.Text = "Seleccionada: " .. display
+                attach()
+            end)
+        end
+    end
 end
 
-folder.ChildAdded:Connect(refresh)
-folder.ChildRemoved:Connect(function() if id and not folder:FindFirstChild(id) then id=nil; sel.Text="Seleccionada: Ninguna"; attach() end; refresh() end)
-refresh()
-
-close.MouseButton1Click:Connect(function() running=false; sending=false; g.Enabled=false end)
-
-startBtn.MouseButton1Click:Connect(function()
-	running=not running
-	if running then startBtn.Text="⏸ Detener"; startBtn.BackgroundColor3=Color3.fromRGB(180,80,60); if id and not hasStop(folder:FindFirstChild(id)) then sending=true end
-	else startBtn.Text="▶ Iniciar"; startBtn.BackgroundColor3=Color3.fromRGB(0,150,80); sending=false end
-	sel.Text=(running and "AutoRoll ON: " or "AutoRoll OFF: ")..(id or "Ninguna")
+-- Conectar cambios en folder para refrescar
+folder:GetPropertyChangedSignal("Parent") -- noop to ensure folder exists
+folderConn = folder.ChildAdded:Connect(refreshList)
+folder.ChildRemoved:Connect(function()
+    if selectedId and not folder:FindFirstChild(selectedId) then
+        selectedId = nil
+        gui.selectedLabel.Text = "Seleccionada: Ninguna"
+        attach()
+    end
+    refreshList()
 end)
 
-intervalBox.FocusLost:Connect(function() local n=tonumber(intervalBox.Text) if n and n>0.02 then interval=n else intervalBox.Text=tostring(interval) end end)
+-- UI botones
+gui.refreshBtn.MouseButton1Click:Connect(refreshList)
+gui.closeBtn.MouseButton1Click:Connect(function() gui.screen.Enabled = false end)
 
-UIS.InputBegan:Connect(function(i,gp) if gp then return end
-	if i.KeyCode==Enum.KeyCode.T then
-		running=not running
-		if running then startBtn.Text="⏸ Detener"; startBtn.BackgroundColor3=Color3.fromRGB(180,80,60); if id and not hasStop(folder:FindFirstChild(id)) then sending=true end
-		else startBtn.Text="▶ Iniciar"; startBtn.BackgroundColor3=Color3.fromRGB(0,150,80); sending=false end
-		sel.Text=(running and "AutoRoll ON: " or "AutoRoll OFF: ")..(id or "Ninguna")
-	end
+-- Start/Stop UI button
+gui.startBtn.MouseButton1Click:Connect(function()
+    running = not running
+    if running then
+        gui.startBtn.Text = "⏸ Detener"
+        gui.startBtn.BackgroundColor3 = Color3.fromRGB(180,80,60)
+        if selectedId and not hasStop(folder:FindFirstChild(selectedId)) then sending = true end
+    else
+        gui.startBtn.Text = "▶ Iniciar"
+        gui.startBtn.BackgroundColor3 = Color3.fromRGB(0,140,80)
+        sending = false
+    end
+    gui.selectedLabel.Text = (running and "AutoRoll ON: " or "AutoRoll OFF: ") .. (selectedId or "Ninguna")
 end)
 
+-- Interval box handling
+gui.intervalBox.FocusLost:Connect(function(enter)
+    local txt = gui.intervalBox.Text
+    local n = tonumber(txt)
+    if n and n > 0.02 then
+        interval = n
+    else
+        gui.intervalBox.Text = tostring(interval)
+    end
+end)
+
+-- Hotkey T toggles running (mantengo tu hotkey original)
+UIS.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.T then
+        running = not running
+        if running then
+            gui.startBtn.Text = "⏸ Detener"
+            gui.startBtn.BackgroundColor3 = Color3.fromRGB(180,80,60)
+            if selectedId and not hasStop(folder:FindFirstChild(selectedId)) then sending = true end
+        else
+            gui.startBtn.Text = "▶ Iniciar"
+            gui.startBtn.BackgroundColor3 = Color3.fromRGB(0,140,80)
+            sending = false
+        end
+        gui.selectedLabel.Text = (running and "AutoRoll ON: " or "AutoRoll OFF: ") .. (selectedId or "Ninguna")
+    end
+end)
+
+-- Core sending loop
 task.spawn(function()
-	while true do
-		if running and sending and id and Rep and Rep:FindFirstChild("Remotes") and Rep.Remotes:FindFirstChild("TraitReroll") then
-			pcall(function() Rep.Remotes.TraitReroll:FireServer("Token","Trait",id,"Confirm") end)
-		end
-		task.wait(interval)
-	end
+    while true do
+        if running and sending and selectedId and ReplicatedStorage and ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("TraitReroll") then
+            -- dispara el remote (igual que tu script original)
+            pcall(function()
+                ReplicatedStorage.Remotes.TraitReroll:FireServer("Token", "Trait", selectedId, "Confirm")
+            end)
+        end
+        task.wait(interval)
+    end
 end)
+
+-- Inicializa lista
+refreshList()
