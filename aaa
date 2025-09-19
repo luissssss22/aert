@@ -1,0 +1,133 @@
+-- LocalScript: sequence segura (usar SOLO en Studio / en tu juego)
+local RunService = game:GetService("RunService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local TeleportService = game:GetService("TeleportService")
+
+-- =========== CONFIG (cambia solo si entiendes riesgos) ===========
+local ALLOW_EXECUTE = false            -- <<-- PONER A true SOLO SI ESTÁS EN TU JUEGO EN STUDIO
+local DEFAULT_NUMBER = 1000            -- si getgenv().Number no está definido
+local SUMMON_CONCURRENCY = 25          -- límite de invocaciones concurrentes (ajusta si quieres)
+local WAIT_FOR_UNIT_SECONDS = 10       -- tiempo de espera antes de comprobar la unidad
+-- ==================================================================
+
+if not ALLOW_EXECUTE then
+    warn("ALERT: ALLOW_EXECUTE está en false. Cambia a true SOLO si estás en TU juego en Studio.")
+    return
+end
+
+if not RunService:IsStudio() then
+    warn("ALERT: Ejecutar solo en Studio. Abortando para prevenir uso en juegos públicos.")
+    return
+end
+
+local player = Players.LocalPlayer
+
+-- Helper seguro para obtener Remote
+local function getRemote(path)
+    local cur = ReplicatedStorage
+    for _, name in ipairs(path) do
+        cur = cur and cur:FindFirstChild(name)
+        if not cur then return nil end
+    end
+    return cur
+end
+
+-- 1) Disparar Settings (SFX)
+local settingsPath = {"MainSharedFolder","Remotes","Settings"}
+local settingsRemote = getRemote(settingsPath)
+if not settingsRemote then
+    warn("No se encontró Settings Remote en ReplicatedStorage.MainSharedFolder.Remotes.Settings")
+else
+    pcall(function()
+        settingsRemote:FireServer("SFX Volume", "\237\190\140")
+    end)
+    print("Settings FireServer enviado.")
+end
+
+-- 2) Ejecutar loop de Summon (getgenv().Number) con task.spawn
+getgenv().Number = tonumber(getgenv().Number) or DEFAULT_NUMBER
+local total = getgenv().Number
+
+local summonPath = {"LobbyFolder","Remotes","Summon"}
+local summonRemote = getRemote(summonPath)
+if not summonRemote then
+    warn("No se encontró Summon Remote en ReplicatedStorage.LobbyFolder.Remotes.Summon")
+else
+    local isEvent = summonRemote:IsA("RemoteEvent")
+    local isFunction = summonRemote:IsA("RemoteFunction")
+
+    -- control simple de concurrencia
+    local semaphore = 0
+    local function waitFree()
+        while semaphore >= SUMMON_CONCURRENCY do
+            task.wait()
+        end
+    end
+
+    local summonArgs = {"Verse Banner", 10}
+    for i = 1, total do
+        waitFree()
+        semaphore = semaphore + 1
+        task.spawn(function()
+            local ok, err
+            if isEvent then
+                ok, err = pcall(function() summonRemote:FireServer(unpack(summonArgs)) end)
+            elseif isFunction then
+                ok, err = pcall(function() summonRemote:InvokeServer(unpack(summonArgs)) end)
+            else
+                warn("Summon no es RemoteEvent ni RemoteFunction. Tipo:", tostring(summonRemote.ClassName))
+                ok = false
+            end
+            if not ok then
+                warn(("Error en Summon #%d: %s"):format(i, tostring(err)))
+            end
+            semaphore = semaphore - 1
+        end)
+    end
+
+    -- esperar a que terminen las tareas
+    while semaphore > 0 do
+        task.wait(0.05)
+    end
+    print(("Se intentaron %d llamadas a Summon."):format(total))
+end
+
+-- 3) Esperar WAIT_FOR_UNIT_SECONDS y comprobar la unidad "Abysal"
+task.wait(WAIT_FOR_UNIT_SECONDS)
+
+-- Buscar la unidad de forma segura mediante WaitForChild/FindFirstChild según convenga
+local function safeFindUnit(name, timeout)
+    timeout = timeout or 0
+    local gui = player:FindFirstChild("PlayerGui")
+    if not gui then return nil end
+
+    local ok, main = pcall(function() return gui:FindFirstChild("MainScreenFolder") end)
+    if not ok or not main then return nil end
+
+    local shared = main:FindFirstChild("SharedSideScreen")
+    if not shared then return nil end
+    local frames = shared:FindFirstChild("Frames")
+    if not frames then return nil end
+    local unitFrame = frames:FindFirstChild("UnitFrame")
+    if not unitFrame then return nil end
+    local scroll = unitFrame:FindFirstChild("Scroll")
+    if not scroll then return nil end
+
+    if timeout > 0 then
+        return scroll:FindFirstChild(name) or scroll:WaitForChild(name, timeout)
+    else
+        return scroll:FindFirstChild(name)
+    end
+end
+
+local abysal = safeFindUnit("Abysal", 0)
+if abysal then
+    print("Unidad 'Abysal' encontrada. No se teleporta.")
+else
+    warn("Unidad 'Abysal' NO encontrada. Teleportando al jugador a la misma instancia.")
+    -- Teleport al mismo place/instance
+    pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, player)
+    end)
+end
