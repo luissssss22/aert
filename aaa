@@ -1,133 +1,132 @@
--- LocalScript: sequence segura (usar SOLO en Studio / en tu juego)
-local RunService = game:GetService("RunService")
+-- Script para buscar la unidad robustamente y actuar según resultado
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Players = game:GetService("Players")
 local TeleportService = game:GetService("TeleportService")
 
--- =========== CONFIG (cambia solo si entiendes riesgos) ===========
-local ALLOW_EXECUTE = false            -- <<-- PONER A true SOLO SI ESTÁS EN TU JUEGO EN STUDIO
-local DEFAULT_NUMBER = 1000            -- si getgenv().Number no está definido
-local SUMMON_CONCURRENCY = 25          -- límite de invocaciones concurrentes (ajusta si quieres)
-local WAIT_FOR_UNIT_SECONDS = 10       -- tiempo de espera antes de comprobar la unidad
--- ==================================================================
-
-if not ALLOW_EXECUTE then
-    warn("ALERT: ALLOW_EXECUTE está en false. Cambia a true SOLO si estás en TU juego en Studio.")
-    return
-end
-
-if not RunService:IsStudio() then
-    warn("ALERT: Ejecutar solo en Studio. Abortando para prevenir uso en juegos públicos.")
-    return
-end
-
 local player = Players.LocalPlayer
 
--- Helper seguro para obtener Remote
-local function getRemote(path)
-    local cur = ReplicatedStorage
-    for _, name in ipairs(path) do
-        cur = cur and cur:FindFirstChild(name)
-        if not cur then return nil end
+-- Ajusta estos nombres si quieres buscar otra cosa
+local SCROLL_PATH = {"PlayerGui","MainScreenFolder","SharedSideScreen","Frames","UnitFrame","Scroll"}
+local UNIT_TO_FIND = "Bulm"          -- nombre que crees que tiene la unidad en el Explorer
+local TIMEOUT_WAIT_FOR_GUI = 5       -- segundos para esperar a PlayerGui y ancestros
+local WAIT_AFTER_SUMMON = 10         -- segundos que ya usabas
+
+-- obtener settings remote de forma segura
+local ok, settings = pcall(function()
+    return ReplicatedStorage:WaitForChild("MainSharedFolder", 5):WaitForChild("Remotes", 5):WaitForChild("Settings", 5)
+end)
+if not ok or not settings then
+    warn("No se pudo obtener Settings Remote (revisa ruta).")
+    return
+end
+
+-- FUN: obtener referencia segura al Scroll (evita errores si algo falta)
+local function getScroll()
+    local gui = player:FindFirstChild("PlayerGui")
+    if not gui then
+        gui = player:WaitForChild("PlayerGui", TIMEOUT_WAIT_FOR_GUI)
+        if not gui then return nil, "PlayerGui no encontrado" end
+    end
+
+    local cur = gui
+    for _, part in ipairs({"MainScreenFolder","SharedSideScreen","Frames","UnitFrame","Scroll"}) do
+        cur = cur:FindFirstChild(part)
+        if not cur then
+            return nil, ("No existe '%s' en la ruta GUI"):format(part)
+        end
     end
     return cur
 end
 
--- 1) Disparar Settings (SFX)
-local settingsPath = {"MainSharedFolder","Remotes","Settings"}
-local settingsRemote = getRemote(settingsPath)
-if not settingsRemote then
-    warn("No se encontró Settings Remote en ReplicatedStorage.MainSharedFolder.Remotes.Settings")
-else
-    pcall(function()
-        settingsRemote:FireServer("SFX Volume", "\237\190\140")
-    end)
-    print("Settings FireServer enviado.")
+-- FUN recursiva para listar hijos (útil para depuración)
+local function listChildren(root, depth)
+    depth = depth or 0
+    local prefix = string.rep("  ", depth)
+    for _, child in ipairs(root:GetChildren()) do
+        print(prefix .. ("%s  (Class=%s, Visible=%s)"):format(child.Name, child.ClassName, tostring(child.Visible)))
+        -- si tiene Texto, imprímelo
+        if child:IsA("TextLabel") or child:IsA("TextButton") or child:IsA("TextBox") then
+            print(prefix .. "   -> Text: " .. tostring(child.Text))
+        end
+        -- recorre recursivamente hasta 2 niveles (evita logs gigantes)
+        if depth < 2 then
+            listChildren(child, depth + 1)
+        end
+    end
 end
 
--- 2) Ejecutar loop de Summon (getgenv().Number) con task.spawn
-getgenv().Number = tonumber(getgenv().Number) or DEFAULT_NUMBER
-local total = getgenv().Number
+-- FUN que intenta detectar la unidad por varias estrategias
+local function findUnit(scroll, unitName)
+    if not scroll then return nil end
 
-local summonPath = {"LobbyFolder","Remotes","Summon"}
-local summonRemote = getRemote(summonPath)
-if not summonRemote then
-    warn("No se encontró Summon Remote en ReplicatedStorage.LobbyFolder.Remotes.Summon")
-else
-    local isEvent = summonRemote:IsA("RemoteEvent")
-    local isFunction = summonRemote:IsA("RemoteFunction")
+    -- 1) búsqueda por FindFirstChild exacta
+    local exact = scroll:FindFirstChild(unitName)
+    if exact then
+        return exact, "exact name match"
+    end
 
-    -- control simple de concurrencia
-    local semaphore = 0
-    local function waitFree()
-        while semaphore >= SUMMON_CONCURRENCY do
-            task.wait()
+    -- 2) búsqueda por subcadena en el Name (case-insensitive)
+    local lowUnit = unitName:lower()
+    for _, child in ipairs(scroll:GetChildren()) do
+        if child.Name:lower():find(lowUnit, 1, true) then
+            return child, "name substring match"
         end
     end
 
-    local summonArgs = {"Verse Banner", 10}
-    for i = 1, total do
-        waitFree()
-        semaphore = semaphore + 1
-        task.spawn(function()
-            local ok, err
-            if isEvent then
-                ok, err = pcall(function() summonRemote:FireServer(unpack(summonArgs)) end)
-            elseif isFunction then
-                ok, err = pcall(function() summonRemote:InvokeServer(unpack(summonArgs)) end)
-            else
-                warn("Summon no es RemoteEvent ni RemoteFunction. Tipo:", tostring(summonRemote.ClassName))
-                ok = false
+    -- 3) búsqueda por contenido de Text en descendientes (ej. Labels dentro del template)
+    for _, child in ipairs(scroll:GetChildren()) do
+        for _, desc in ipairs(child:GetDescendants()) do
+            if (desc:IsA("TextLabel") or desc:IsA("TextButton") or desc:IsA("TextBox")) and type(desc.Text) == "string" then
+                if desc.Text:lower():find(lowUnit, 1, true) then
+                    return child, "descendant Text match (" .. tostring(desc:GetFullName()) .. ")"
+                end
             end
-            if not ok then
-                warn(("Error en Summon #%d: %s"):format(i, tostring(err)))
-            end
-            semaphore = semaphore - 1
-        end)
+        end
     end
 
-    -- esperar a que terminen las tareas
-    while semaphore > 0 do
-        task.wait(0.05)
+    -- 4) fallback: buscar por etiqueta "Unit" en el nombre o clase
+    for _, child in ipairs(scroll:GetChildren()) do
+        if child.Name:lower():find("unit",1,true) or child.ClassName:lower():find("frame",1,true) then
+            -- revisa dentro por texto corto parecido
+            for _, desc in ipairs(child:GetDescendants()) do
+                if (desc:IsA("TextLabel") or desc:IsA("TextButton")) and desc.Text and desc.Text:lower():find(lowUnit,1,true) then
+                    return child, "fallback descendant Text match"
+                end
+            end
+        end
     end
-    print(("Se intentaron %d llamadas a Summon."):format(total))
+
+    return nil
 end
 
--- 3) Esperar WAIT_FOR_UNIT_SECONDS y comprobar la unidad "Abysal"
-task.wait(WAIT_FOR_UNIT_SECONDS)
+-- === EJECUCIÓN ===
 
--- Buscar la unidad de forma segura mediante WaitForChild/FindFirstChild según convenga
-local function safeFindUnit(name, timeout)
-    timeout = timeout or 0
-    local gui = player:FindFirstChild("PlayerGui")
-    if not gui then return nil end
+-- 0) (opcional) dispara tu primer Settings antes de buscar (si ya lo haces en otro lado)
+settings:FireServer("SFX Volume", "\237\190\140")
 
-    local ok, main = pcall(function() return gui:FindFirstChild("MainScreenFolder") end)
-    if not ok or not main then return nil end
+-- espera tu tiempo luego de summons
+task.wait(WAIT_AFTER_SUMMON)
 
-    local shared = main:FindFirstChild("SharedSideScreen")
-    if not shared then return nil end
-    local frames = shared:FindFirstChild("Frames")
-    if not frames then return nil end
-    local unitFrame = frames:FindFirstChild("UnitFrame")
-    if not unitFrame then return nil end
-    local scroll = unitFrame:FindFirstChild("Scroll")
-    if not scroll then return nil end
-
-    if timeout > 0 then
-        return scroll:FindFirstChild(name) or scroll:WaitForChild(name, timeout)
-    else
-        return scroll:FindFirstChild(name)
-    end
+-- obtener scroll de forma segura y listar hijos para depuración
+local scroll, err = getScroll()
+if not scroll then
+    warn("No se encontró Scroll: " .. tostring(err))
+    -- si no hay Scroll, hacemos teleport (igual que tu flujo)
+    TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, player)
+    return
 end
 
-local abysal = safeFindUnit("Abysal", 0)
-if abysal then
-    print("Unidad 'Abysal' encontrada. No se teleporta.")
+print("=== Lista de primeros hijos de Scroll (depuración) ===")
+listChildren(scroll, 0)
+print("=== Fin del listado ===")
+
+-- intentar encontrar la unidad con varias estrategias
+local unit, reason = findUnit(scroll, UNIT_TO_FIND)
+if unit then
+    print(("Unidad encontrada (%s) por: %s"):format(unit.Name, reason))
+    -- solo si la encuentra, enviar SFX Volume = 1
+    settings:FireServer("SFX Volume", 1)
 else
-    warn("Unidad 'Abysal' NO encontrada. Teleportando al jugador a la misma instancia.")
-    -- Teleport al mismo place/instance
-    pcall(function()
-        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, player)
-    end)
+    warn("Unidad no encontrada por ninguna estrategia. Se hará teleport.")
+    TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, player)
 end
